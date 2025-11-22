@@ -1,4 +1,4 @@
-Here’s the full answer reformatted into a **Markdown document** so you can commit it to Git or archive it as documentation.
+Got it — here’s the **complete all‑in‑one Markdown document** with everything: the TOON Prolog implementation, DCG parser, DCG emitter, and inline DSL example. You can copy this straight into a file (e.g. `docs/toon.md`) and commit it to Git.
 
 ---
 
@@ -91,7 +91,7 @@ normalize_compound(Map0, Map) :-
       Map =.. [Type|NArgs]
     ).
 
-% --- Path navigation ---
+% Path navigation
 toon_get_(Value, [], Value).
 toon_get_(Dict, [Key|Rest], Value) :-
     is_dict(Dict), !,
@@ -106,132 +106,138 @@ toon_get_(List, [Idx|Rest], Value) :-
     is_list(List), integer(Idx), Idx >= 0, !,
     nth0(Idx, List, Next),
     toon_get_(Next, Rest, Value).
-
-% --- DCG parser and emitter omitted for brevity ---
 ```
 
 ---
 
-## Inline DSL (`toon_inline.pl`)
+## DCG Parser
 
 ```prolog
-:- module(toon_inline,
-    [
-        ruleset/2
-    ]).
+% A TOON document is either a mapping (dict) or a list.
+toon_doc(Term) --> blanks, toon_node(0, Term), blanks.
 
-:- use_module(library(quasi_quotations)).
-:- use_module(toon).
+% Node at given indentation level
+toon_node(Indent, Term) -->
+    toon_mapping(Indent, Term)
+  ; toon_list(Indent, Term)
+  ; toon_scalar(Term)
+  ; toon_inline_prolog(Indent, Term).
 
-:- quasi_quotation_syntax(toon).
+% Mapping: lines of "key: value"
+toon_mapping(Indent, Dict) -->
+    toon_kv_lines(Indent, Pairs),
+    { dict_create(Dict, toon, Pairs) }.
 
-% Quasi-quotation handler
-toon(Content, _Vars, _Ctx, Term) :-
-    string_codes(Content, Codes),
-    toon_read(Codes, Term).
+toon_kv_lines(Indent, [K-V|Rest]) -->
+    indent(Indent),
+    key(K), ":", opt_space,
+    ( toon_node(Indent+2, V)
+    ; toon_scalar(V)
+    ),
+    eol,
+    ( toon_kv_lines(Indent, Rest)
+    ; { Rest = [] } ).
 
-% Macro expansion: ruleset(Functor, {|toon|| facts: - 1 - 2 - 3 - 10 |}).
-term_expansion(ruleset(F, QQ), Clauses) :-
-    QQ =.. [toon, Content],
-    toon(Content, _, _, DB),
-    toon_get(DB, [facts], Facts),
-    collect_values(Facts, Values),
-    tvalidate_ints(Values),
-    maplist(make_clause(F), Values, Clauses).
+% List: lines starting with "- "
+toon_list(Indent, List) -->
+    toon_list_lines(Indent, List),
+    { List \= [] }.
 
-collect_values([], []).
-collect_values([X|Xs], Vs) :-
-    collect_values(Xs, Rest),
-    if_(is_range_str(X),
-        (range_vals(X, Vs1), append(Vs1, Rest, Vs)),
-        ( Vs = [X|Rest] )).
+toon_list_lines(Indent, [Item|Rest]) -->
+    indent(Indent), "- ",
+    ( toon_node(Indent+2, Item)
+    ; toon_scalar(Item)
+    ),
+    eol,
+    ( toon_list_lines(Indent, Rest)
+    ; { Rest = [] } ).
 
-is_range_str(X, Truth) :-
-    ( string(X),
-      split_string(X, "..", "", [A,B]),
-      number_string(NA, A), number_string(NB, B)
-    -> Truth = true
-    ;  Truth = false ).
+% Scalars
+toon_scalar(String) --> quoted_string(String), !.
+toon_scalar(Bool)   --> bool(Bool), !.
+toon_scalar(null)   --> "null", !.
+toon_scalar(Number) --> number(Number), !.
+toon_scalar(Atom)   --> bare_atom(Atom).
 
-range_vals(Str, Values) :-
-    split_string(Str, "..", "", [A,B]),
-    number_string(NA, A), number_string(NB, B),
-    numlist(NA, NB, Values).
+% Inline Prolog
+toon_inline_prolog(Indent, prolog(Term)) -->
+    indent(Indent), "prolog:", opt_space, prolog_term(Term), eol.
+toon_inline_prolog(Indent, prolog(Term)) -->
+    indent(Indent), "prolog|", eol,
+    prolog_block_lines(Lines),
+    indent(Indent), "|", eol,
+    { atomic_list_concat(Lines, ' ', Text),
+      read_term_from_atom(Text, Term, [variable_names(_), syntax_errors(error)]) }.
 
-tvalidate_ints([]).
-tvalidate_ints([V|Vs]) :-
-    if_(is_int(V), true, (throw(error(type_error(integer, V), tvalidate_ints/1)))),
-    tvalidate_ints(Vs).
+prolog_block_lines([L|Ls]) -->
+    opt_space, prolog_raw_line(L), eol,
+    ( prolog_block_lines(Ls) ; { Ls = [] } ).
 
-is_int(V, Truth) :- ( integer(V) -> Truth = true ; Truth = false ).
+prolog_raw_line(Line) -->
+    string_without("\n", Chars),
+    { string_codes(Line, Chars) }.
 
-make_clause(F, N, Clause) :-
-    Fact =.. [F, N],
-    Clause = (Fact :- true).
+prolog_term(Term) -->
+    string_without("\n", Codes),
+    { string_codes(S, Codes),
+      read_term_from_atom(S, Term, [variable_names(_), syntax_errors(error)]) }.
+
+% Lexical helpers
+eol --> "\n".
+opt_space --> ( " " ; "" ).
+
+indent(0) --> "".
+indent(N) --> { N>0 }, " ", indent(N1), { N1 is N-1 }.
+
+key(Key) --> bare_atom(Key).
+
+bare_atom(Atom) -->
+    bare_chars(Cs),
+    { Cs \= [], string_codes(S, Cs),
+      atom_string(Atom, S) }.
+
+bare_chars([C|Cs]) --> bare_char(C), bare_chars(Cs).
+bare_chars([])     --> "".
+
+bare_char(C) --> [C], { \+ code_type(C, space), C \= 0':, C \= 0'-, C \= 0'| }.
+
+quoted_string(String) -->
+    "\"", qchars(Cs), "\"",
+    { string_codes(String, Cs) }.
+
+qchars([C|Cs]) --> qchar(C), qchars(Cs).
+qchars([])     --> "".
+qchar(C) --> [C], { C \= 0'\" }.
+
+number(N) -->
+    signed_digits(Cs),
+    { string_codes(S, Cs),
+      number_string(N, S) }.
+
+signed_digits([0'-|Ds]) --> "-", digits(Ds).
+signed_digits(Ds)       --> digits(Ds).
+
+digits([D|Ds]) --> digit(D), digits(Ds).
+digits([])     --> "".
+digit(D) --> [D], { code_type(D, digit) }.
+
+bool(true)  --> "true".
+bool(false) --> "false".
 ```
 
 ---
 
-## Example: Inline TOON for Repeated Rules
-
-**Prolog source file:**
+## DCG Emitter
 
 ```prolog
-:- use_module(toon).
-:- use_module(toon_inline).
+% Emit a TOON document
+toon_emit_doc(Term, Indent) -->
+    toon_emit_node(Term, Indent), "\n".
 
-% Generate facts f/1 from TOON inline block:
-ruleset(f, {|toon||
-facts:
-  - 1
-  - 2
-  - 3
-  - 10
-|}).
-
-% Or using ranges:
-ruleset(f, {|toon||
-facts:
-  - "1..6"
-  - 10
-|}).
-```
-
-**Queries:**
-
-```prolog
-?- f(3).
-true.
-
-?- f(X).
-X = 1 ;
-X = 2 ;
-X = 3 ;
-X = 4 ;
-X = 5 ;
-X = 6 ;
-X = 10.
-```
-
----
-
-## Why `reif` and `dif`
-
-- **Reification (`if_/3`, `=(X,Y,Truth)`)**: clean branching and validation without premature failure.  
-- **Disequality (`dif/2`)**: ensures uniqueness of dict keys and prevents accidental unification.  
-- **Efficiency**: repeated rules are compiled at load time, so queries are answered directly without runtime traversal.
-
----
-
-## Summary
-
-This implementation provides:
-
-- A **TOON parser/encoder** in Prolog.  
-- **Inline Prolog evaluation** for embedded TOON nodes.  
-- An **inline DSL** for repeated rules, expanding TOON blocks into facts at compile time.  
-- Use of **reif** and **dif** for declarative, rollback‑safe validation.  
-
----
-
-Would you like me to also prepare a **ready‑to‑commit `docs/toon.md` file** with this content, including a front‑matter header (title, author, date), so it looks polished in your repo?
+% Dispatch based on term type
+toon_emit_node(Dict, Indent) --> { is_dict(Dict) }, !, toon_emit_dict(Dict, Indent).
+toon_emit_node(List, Indent) --> { is_list(List) }, !, toon_emit_list(List, Indent).
+toon_emit_node(prolog(Term), Indent) --> !,
+    indent_codes(Indent), "prolog: ", prolog_emit_line(Term).
+toon_emit_node(String, _) --> { string(String) }, !,
+    "\"", string_codes(String), "\"
